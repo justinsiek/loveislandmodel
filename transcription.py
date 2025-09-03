@@ -1,6 +1,7 @@
 import os
 import cv2
 from typing import List, Optional
+import numpy as np
 
 
 def sample_frames(
@@ -41,6 +42,79 @@ def sample_frames(
     return saved
 
 
+def find_subtitle_polygon(
+    frame_bgr,
+    white_thresh: int = 250,
+    expand_px: int = 10,
+):
+    """
+    Detect a white subtitle box (black text on white) and return a straight-edged polygon.
+    - Thresholds for white.
+    - Morphologically closes to fill text holes and connects lines.
+    - Optionally dilates outward by `expand_px` to avoid clipping near edges.
+    - Chooses the largest region, then approximates to straight lines.
+    Returns: contour (Nx1x2) in full-frame coordinates, or None.
+    """
+    H, W = frame_bgr.shape[:2]
+    y0 = 0
+    roi = frame_bgr[y0:, :]
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    _, mask = cv2.threshold(gray, white_thresh, 255, cv2.THRESH_BINARY)
+
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (15, 9)), iterations=1)
+    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_RECT, (21, 11)), iterations=1)
+    if expand_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * expand_px + 1, 2 * expand_px + 1))
+        mask = cv2.dilate(mask, k, iterations=1)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    best = max(contours, key=cv2.contourArea)
+    best = best + np.array([0, y0]).reshape(1, 1, 2)
+
+    peri = cv2.arcLength(best, True)
+    approx = cv2.approxPolyDP(best, 0.004 * peri, True)
+    return approx
+
+
+def draw_polygons_on_frames(
+    frames_dir: str = "debug_frames",
+    out_dir: str = "debug_sub_overlays",
+    white_thresh: int = 250,
+    expand_px: int = 10,
+) -> int:
+    """
+    For each saved frame, draw the detected subtitle polygon (if any) and save overlay.
+    Returns the number of overlays saved.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    names = sorted([n for n in os.listdir(frames_dir) if n.lower().endswith((".jpg", ".png"))])
+
+    count = 0
+    for name in names:
+        path = os.path.join(frames_dir, name)
+        frame = cv2.imread(path)
+        if frame is None:
+            continue
+
+        poly = find_subtitle_polygon(frame, white_thresh=white_thresh, expand_px=expand_px)
+        overlay = frame.copy()
+        if poly is not None:
+            cv2.drawContours(overlay, [poly], -1, (0, 255, 0), 3)
+        else:
+            cv2.putText(overlay, "NO SUB POLYGON", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+
+        cv2.imwrite(os.path.join(out_dir, f"overlay_{name}"), overlay)
+        count += 1
+
+    print(f"Saved {count} overlays to '{out_dir}'")
+    return count
+
+
 if __name__ == "__main__":
     video = os.path.join("videos", "Taylor Ola Initial Chat.mp4")
     sample_frames(video, out_dir="debug_frames", every_sec=1.0, limit=60)
+    draw_polygons_on_frames(frames_dir="debug_frames", out_dir="debug_sub_overlays", white_thresh=250)
