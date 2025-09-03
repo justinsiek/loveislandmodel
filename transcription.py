@@ -114,7 +114,121 @@ def draw_polygons_on_frames(
     return count
 
 
+def to_text_only(
+    crop_bgr,
+    mask_roi,
+    text_thresh: int = 0,
+    dilate_px: int = 1,
+    border_clear_px: int = 20,   # distance (px) we must be inside the polygon to be kept
+):
+    # Compute "interior-only" mask via distance transform
+    mask_u8 = (mask_roi > 0).astype(np.uint8) * 255
+    if border_clear_px > 0:
+        dist = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 3)
+        keep_core = (dist > float(border_clear_px)).astype(np.uint8) * 255
+    else:
+        keep_core = mask_u8
+
+    # Detect dark text
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    if text_thresh <= 0:
+        _, text = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    else:
+        _, text = cv2.threshold(gray, text_thresh, 255, cv2.THRESH_BINARY_INV)
+
+    # Light cleanup
+    if dilate_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * dilate_px + 1, 2 * dilate_px + 1))
+        text = cv2.morphologyEx(text, cv2.MORPH_OPEN, k, iterations=1)
+
+    # Remove anything too close to the polygon edge (kills the black border)
+    text = cv2.bitwise_and(text, keep_core)
+
+    # Compose white background with black text
+    out = np.full_like(crop_bgr, 255)
+    out[text > 0] = (0, 0, 0)
+    return out
+
+
+def crop_polygons_on_frames(
+    frames_dir: str = "debug_frames",
+    out_dir: str = "debug_sub_crops",
+    white_thresh: int = 245,
+    pad_px: int = 6,
+    erode_mask_px: int = 2,
+    whiten_outside: bool = True,
+    text_only: bool = True,
+    text_thresh: int = 0,
+    dilate_px: int = 1,
+) -> int:
+    """
+    - Finds the subtitle polygon.
+    - Crops its bounding rect with small padding.
+    - Optionally whitens outside the polygon.
+    - Optionally outputs text-only (white background, black text) inside the polygon.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    names = sorted([n for n in os.listdir(frames_dir) if n.lower().endswith((".jpg", ".png"))])
+
+    count = 0
+    for name in names:
+        path = os.path.join(frames_dir, name)
+        frame = cv2.imread(path)
+        if frame is None:
+            continue
+
+        poly = find_subtitle_polygon(frame, white_thresh=white_thresh)
+        if poly is None:
+            continue
+
+        x, y, w, h = cv2.boundingRect(poly)
+        H, W = frame.shape[:2]
+        x = max(0, x - pad_px)
+        y = max(0, y - pad_px)
+        w = min(W - x, w + 2 * pad_px)
+        h = min(H - y, h + 2 * pad_px)
+
+        crop = frame[y:y + h, x:x + w].copy()
+
+        mask_full = np.zeros((H, W), np.uint8)
+        cv2.drawContours(mask_full, [poly], -1, 255, thickness=-1)
+        mask_roi = mask_full[y:y + h, x:x + w]
+
+        if erode_mask_px > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * erode_mask_px + 1, 2 * erode_mask_px + 1))
+            mask_roi = cv2.erode(mask_roi, k, iterations=1)
+
+        if whiten_outside:
+            crop[mask_roi == 0] = 255
+
+        if text_only:
+            crop = to_text_only(
+                crop, mask_roi,
+                text_thresh=0,
+                dilate_px=1,
+                border_clear_px=20, 
+            )
+
+        out_path = os.path.join(out_dir, f"sub_{name}")
+        cv2.imwrite(out_path, crop)
+        count += 1
+
+    print(f"Saved {count} crops to '{out_dir}'")
+    return count
+
+
 if __name__ == "__main__":
     video = os.path.join("videos", "Taylor Ola Initial Chat.mp4")
     sample_frames(video, out_dir="debug_frames", every_sec=1.0, limit=60)
-    draw_polygons_on_frames(frames_dir="debug_frames", out_dir="debug_sub_overlays", white_thresh=250)
+    draw_polygons_on_frames(frames_dir="debug_frames", out_dir="debug_sub_overlays", white_thresh=245)
+    crop_polygons_on_frames(
+        frames_dir="debug_frames",
+        out_dir="debug_sub_crops",
+        white_thresh=245,
+        pad_px=6,
+        erode_mask_px=2,
+        whiten_outside=True,
+        text_only=True,
+        text_thresh=0,
+        dilate_px=1,
+    )
