@@ -2,6 +2,10 @@ import os
 import cv2
 from typing import List, Optional
 import numpy as np
+import re
+from PIL import Image
+import pytesseract
+from datetime import timedelta
 
 
 def sample_frames(
@@ -217,18 +221,114 @@ def crop_polygons_on_frames(
     return count
 
 
+def configure_tesseract(explicit_path: Optional[str] = None) -> None:
+    # Set the path to tesseract.exe if needed
+    if explicit_path:
+        pytesseract.pytesseract.tesseract_cmd = explicit_path
+        return
+    guesses = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ]
+    for g in guesses:
+        if os.path.exists(g):
+            pytesseract.pytesseract.tesseract_cmd = g
+            break
+
+def _parse_frame_index(name: str) -> Optional[int]:
+    m = re.search(r"(\d+)(?=\.[A-Za-z]+$)", name)
+    return int(m.group(1)) if m else None
+
+
+def _get_fps(video_path: Optional[str]) -> Optional[float]:
+    if not video_path or not os.path.exists(video_path):
+        return None
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return None
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    cap.release()
+    return fps if fps > 0 else None
+
+
+def _ocr_image(img_bgr) -> str:
+    pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+    txt = pytesseract.image_to_string(pil, config="--oem 3 --psm 6", lang="eng")
+    return " ".join(txt.replace("|", "I").split()).strip()
+
+
+def ocr_crops_to_transcript(
+    crops_dir: str = "debug_sub_crops",
+    video_path: Optional[str] = None,
+    out_csv_path: str = "ocr_per_frame.csv",
+    out_text_path: str = "transcript_step3.txt",
+) -> str:
+    names = sorted([n for n in os.listdir(crops_dir) if n.lower().endswith((".jpg", ".png"))])
+    if not names:
+        print(f"No crops found in '{crops_dir}'")
+        return ""
+
+    fps = _get_fps(video_path)
+    rows = []
+    transcript_lines: List[str] = []
+    last_text = ""
+
+    for name in names:
+        path = os.path.join(crops_dir, name)
+        img = cv2.imread(path)
+        if img is None:
+            continue
+
+        text = _ocr_image(img)
+        if not text:
+            continue
+
+        frame_idx = _parse_frame_index(name) or -1
+        ts = ""
+        if fps and frame_idx >= 0:
+            sec = frame_idx / fps
+            ts = str(timedelta(seconds=sec)).split(".")[0]
+
+        rows.append([name, frame_idx, ts, text])
+
+        if text != last_text:
+            transcript_lines.append(text)
+            last_text = text
+
+    with open(out_csv_path, "w", newline="", encoding="utf-8") as f:
+        import csv
+        w = csv.writer(f)
+        w.writerow(["file", "frame_index", "timestamp", "text"])
+        w.writerows(rows)
+
+    transcript = "\n".join(transcript_lines)
+    with open(out_text_path, "w", encoding="utf-8") as f:
+        f.write(transcript)
+
+    print(f"Wrote {len(rows)} rows to '{out_csv_path}' and {len(transcript_lines)} lines to '{out_text_path}'")
+    return transcript
+
+
 if __name__ == "__main__":
-    video = os.path.join("videos", "Taylor Ola Initial Chat.mp4")
-    sample_frames(video, out_dir="debug_frames", every_sec=1.0, limit=60)
+    configure_tesseract() 
+    sample_frames(video_path="videos/Taylor Ola Initial Chat.mp4", out_dir="debug_frames", every_sec=1.0, limit=60)
     draw_polygons_on_frames(frames_dir="debug_frames", out_dir="debug_sub_overlays", white_thresh=245)
     crop_polygons_on_frames(
         frames_dir="debug_frames",
         out_dir="debug_sub_crops",
-        white_thresh=245,
+        white_thresh=250,
         pad_px=6,
         erode_mask_px=2,
         whiten_outside=True,
         text_only=True,
         text_thresh=0,
         dilate_px=1,
+    )
+
+    video = os.path.join("videos", "Taylor Ola Initial Chat.mp4")
+    ocr_crops_to_transcript(
+        crops_dir="debug_sub_crops",
+        video_path=video,
+        out_csv_path="ocr_per_frame.csv",
+        out_text_path="transcript_step3.txt",
     )
