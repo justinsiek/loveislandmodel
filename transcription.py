@@ -295,6 +295,9 @@ def ocr_crops_to_transcript(
             transcript_lines.append(text)
             last_text = text
 
+    csv_dir = os.path.dirname(out_csv_path)
+    if csv_dir:
+        os.makedirs(csv_dir, exist_ok=True)
     with open(out_csv_path, "w", newline="", encoding="utf-8") as f:
         import csv
         w = csv.writer(f)
@@ -309,14 +312,31 @@ def ocr_crops_to_transcript(
     return transcript
 
 
-if __name__ == "__main__":
-    configure_tesseract() 
-    sample_frames(video_path="videos/Taylor Ola Initial Chat.mp4", out_dir="debug_frames", every_sec=1.0, limit=60)
-    draw_polygons_on_frames(frames_dir="debug_frames", out_dir="debug_sub_overlays", white_thresh=245)
+def transcribe(video_path: str, every_sec: float = 1.0, white_thresh: int = 250) -> str:
+    assert os.path.exists(video_path), f"Video not found: {video_path}"
+    # Per-video folders/files based on filename
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    stem = base.replace(" ", "_")
+
+    base_debug = os.path.join("debug", stem)
+    frames_dir = os.path.join(base_debug, "frames")
+    overlays_dir = os.path.join(base_debug, "overlays")
+    crops_dir = os.path.join(base_debug, "crops")
+    os.makedirs(base_debug, exist_ok=True)
+
+    out_csv_path = os.path.join(base_debug, f"ocr_per_frame_{stem}.csv")
+    os.makedirs("transcripts", exist_ok=True)
+    out_text_path = os.path.join("transcripts", f"{stem}.txt")
+
+    # 1) Sample frames
+    sample_frames(video_path=video_path, out_dir=frames_dir, every_sec=every_sec, limit=None)
+    # 2) Detect/draw polygons (visual check)
+    draw_polygons_on_frames(frames_dir=frames_dir, out_dir=overlays_dir, white_thresh=white_thresh)
+    # 3) Crop + text-only normalization
     crop_polygons_on_frames(
-        frames_dir="debug_frames",
-        out_dir="debug_sub_crops",
-        white_thresh=250,
+        frames_dir=frames_dir,
+        out_dir=crops_dir,
+        white_thresh=white_thresh,
         pad_px=6,
         erode_mask_px=2,
         whiten_outside=True,
@@ -324,11 +344,27 @@ if __name__ == "__main__":
         text_thresh=0,
         dilate_px=1,
     )
-
-    video = os.path.join("videos", "Taylor Ola Initial Chat.mp4")
+    # 4) OCR all crops -> CSV + transcript
     ocr_crops_to_transcript(
-        crops_dir="debug_sub_crops",
-        video_path=video,
-        out_csv_path="ocr_per_frame.csv",
-        out_text_path="transcript_step3.txt",
+        crops_dir=crops_dir,
+        video_path=video_path,
+        out_csv_path=out_csv_path,
+        out_text_path=out_text_path,
     )
+    return out_text_path
+
+
+if __name__ == "__main__":
+    configure_tesseract()
+
+    videos = [
+        os.path.join("videos", "Taylor Ola Initial Chat.mp4"),
+        os.path.join("videos", "Austin Chelley Initial Chat.mp4"),
+        os.path.join("videos", "Huda Jeramiah Initial Chat.mp4"),
+        os.path.join("videos", "Nic Bella Initial Chat.mp4"),
+    ]
+
+    for vp in videos:
+        print("Transcribing:", vp)
+        out_path = transcribe(vp, every_sec=1.0, white_thresh=250)
+        print("Saved transcript to:", out_path)

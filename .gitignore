@@ -1,7 +1,8 @@
-/videos/
 .gitignore
+/videos/
 /debug_frames/
 /debug_sub_overlays/
 /debug_sub_crops/
 /transcript_step3.txt
 /ocr_per_frame.csv
+/debug/
